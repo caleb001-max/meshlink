@@ -1,0 +1,59 @@
+{
+  "expo": {
+    "name": "Calculator",
+    "slug": "calculator",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "scheme": "chimera",
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.chimera.calculator",
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "This calculator uses the local network to sync data between your own devices.",
+        "NSBluetoothAlwaysUsageDescription": "This calculator uses Bluetooth to sync data between your own devices."
+      }
+    },
+    "android": {
+      "package": "com.chimera.calculator",
+      "adaptiveIcon": {
+        "backgroundColor": "#1c1c1e",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow $(PRODUCT_NAME) to access your camera",
+          "microphonePermission": "Allow $(PRODUCT_NAME) to access your microphone",
+          "recordAudioAndroid": true
+        }
+      ],
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Allow $(PRODUCT_NAME) to access your microphone.",
+          "recordAudioAndroid": true
+        }
+      ],
+      "expo-sqlite",
+      "react-native-ble-plx",
+      [
+        "expo-secure-store",
+        {
+          "configureAndroidBackup": true,
+          "faceIDPermission": "Allow $(PRODUCT_NAME) to access your Face ID biometric data."
+        }
+      ]
+    ]
+  }
+}
