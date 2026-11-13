@@ -247,6 +247,8 @@ export class MeshNode {
   private contactCache = new Map<string, ContactRecord>();
   private prekeys: OwnPrekeys | null = null;
   private retried = new Set<string>();
+  /** conversation-tag hex -> real contact id, learned at session promotion. */
+  private convTagToContact = new Map<string, string>();
 
   constructor(opts: MeshNodeOptions) {
     this.identity = opts.identity;
@@ -422,7 +424,7 @@ export class MeshNode {
     if (!link.codec) return;
     const mtu = link.transport === 'ble' ? 420 : 16384;
     for (const frag of fragmentEnvelope(envelopeBytes, mtu)) {
-      link.codec.seal(frag);
+      link.send(concat(new Uint8Array([FRAME_SEALED]), link.codec.seal(frag)));
     }
   }
 
@@ -521,7 +523,7 @@ export class MeshNode {
       b: body,
       m: opts.media ?? null,
       t: opts.targetId ?? null,
-      n: kind === 'profile' || sos ? this.displayName : undefined,
+      n: this.displayName,
       ts: this.now(),
     });
     const plaintext = utf8(JSON.stringify(payload));
@@ -534,13 +536,22 @@ export class MeshNode {
     let conversationTag: Uint8Array | undefined;
 
     if (contact) {
-      dstTag = contact.pairwise ? this.tagForContact(contact) : (opts.dstHelloTag ?? ZERO8);
-      srcTag = contact.pairwise ? this.tagForContact(contact) : (opts.dstHelloTag ?? ZERO8);
       const existing = this.sessions.get(contact.id);
       if (existing) {
         ratchet = existing.ratchet;
+        if (existing.conversationTag && contact.strangerTag) {
+          // Stranger conversation: keep using the stable conversation tag as
+          // the shared address until the pairwise hand-off completes.
+          dstTag = existing.conversationTag;
+          srcTag = dstTag;
+        } else {
+          dstTag = contact.pairwise ? this.tagForContact(contact) : (opts.dstHelloTag ?? ZERO8);
+          srcTag = dstTag;
+        }
       } else {
         if (!contact.bundle) throw new Error('no bundle for contact; pair via QR first');
+        dstTag = contact.pairwise ? this.tagForContact(contact) : (opts.dstHelloTag ?? ZERO8);
+        srcTag = dstTag;
         const bundle: PrekeyBundle = {
           kind: 'paired',
           dhPub: hexToBytes(contact.dhPub),
@@ -573,6 +584,9 @@ export class MeshNode {
     }
 
     const { wire } = sessionEncrypt(ratchet, plaintext, ad, initHeader);
+    // Persist the ratchet AFTER each send so a restart resumes from the exact
+    // chain state (otherwise a restored sender replays already-consumed keys).
+    if (contactId) await this.store.putSession(contactId, ratchet.serialize());
     const env: Envelope = {
       type: TYPE_MSG,
       priority,
@@ -589,7 +603,7 @@ export class MeshNode {
 
     const record: MessageRecord = {
       id: bytesToHex(msgId),
-      contactId: contactId ?? 'stranger:' + bytesToHex(dstTag),
+      contactId: contactId ?? 'stranger:' + bytesToHex(conversationTag ?? dstTag),
       direction: 'out',
       kind: sos ? 'sos' : kind,
       body,
@@ -614,19 +628,12 @@ export class MeshNode {
 
   /** Opportunistic pump: direct-hit delivery plus inventory-less gossip. */
   private pumpQueue(): void {
-    for (const item of this.queue.listAll()) {
-      if (item.forMe) continue;
-      for (const link of this.securedLinks()) {
-        if (link.peerTag && bytesEqual(link.peerTag, item.env.dstTag)) {
-          this.deliverItem(link, item);
-        }
-      }
-    }
-    this.flushAckBatch();
+    void this.pushToPeers();
   }
 
   private deliverItem(link: Link, item: QueueItem): void {
     this.sendOnLink(link, encodeEnvelope(item.env));
+    item.copies = 0; // direct hit: stop spraying this item elsewhere
     void this.markHanded(item.env);
   }
 
@@ -739,12 +746,23 @@ export class MeshNode {
 
   private async handleMsg(env: Envelope): Promise<void> {
     const forMe = await this.matchesMyTags(env.dstTag);
-    if (!forMe) {
+    const isInit = (env.flags & FLAG_SESSION_INIT) !== 0;
+    if (!forMe && !isInit) {
       await this.relayOrDrop(env);
       return;
     }
-    const ctx = await this.resolveInboundSession(env);
-    if (!ctx) return;
+    let ctx = await this.resolveInboundSession(env);
+    if (!ctx && isInit) {
+      // Session-init addressed to a tag we cannot map (e.g. the sender paired
+      // via QR from our published bundle, so we hold their prekey). Attempting
+      // the X3DH is cheap and gated; failure falls through to relay/drop.
+      if (!this.incomingRate.allow('init', this.now())) return;
+      ctx = await this.tryUnmatchedInit(env);
+    }
+    if (!ctx) {
+      if (!forMe) await this.relayOrDrop(env);
+      return;
+    }
     const { body: wire } = decodeSessionWire(env.payload);
     let plaintext: Uint8Array;
     try {
@@ -819,6 +837,23 @@ export class MeshNode {
       this.queue.drop(id, 'acked');
       await this.store.deleteQueueItem(hex);
       this.retried.add(hex);
+      // An ACK for a conversation-tag message proves the peer received our
+      // first E2E message (and thus our identity key): complete the hand-off
+      // to pairwise tags on our side.
+      const rec = await this.store.getMessage(hex);
+      if (rec && rec.direction === 'out' && rec.contactId.startsWith('stranger:')) {
+        const realId = this.convTagToContact.get(rec.contactId.slice('stranger:'.length));
+        if (realId) {
+          const c = await this.getContact(realId);
+          if (c && c.strangerTag) {
+            c.strangerTag = null;
+            await this.store.putContact(c);
+            this.contactCache.set(realId, c);
+          }
+          const sess = this.sessions.get(realId);
+          if (sess) sess.conversationTag = undefined;
+        }
+      }
     }
     this.events.onMessagesChanged?.();
   }
@@ -863,7 +898,7 @@ export class MeshNode {
       const copies = copiesForDestination(item, Math.max(1, links.length));
       let sentTo = 0;
       for (const link of links) {
-        if (link.peerTag && bytesEqual(link.peerTag, item.env.dstTag)) {
+        if (link.peerTag && item.copies > 0 && bytesEqual(link.peerTag, item.env.dstTag)) {
           this.deliverItem(link, item);
           sentTo++;
         } else if (copies > 0) {
@@ -897,37 +932,91 @@ export class MeshNode {
 
   // ------------------------------------------------------- inbound sessions
 
-  private async resolveInboundSession(env: Envelope): Promise<{ ratchet: DoubleRatchet; contactId: string | null; sessionKey: string | null } | null> {
+  private async resolveInboundSession(env: Envelope): Promise<{ ratchet: DoubleRatchet; contactId: string | null; sessionKey: string | null; viaStranger: boolean } | null> {
     const dstHex = bytesToHex(env.dstTag);
     const parsed = decodeSessionWire(env.payload);
     // a) Our HELLO tag: stranger session (init) or continuation.
     const hello = this.helloTags.get(dstHex);
     if (hello) {
       if (parsed.isInit && parsed.init) {
-        return this.initFromHello(env, hello, parsed.init);
+        const r = await this.initFromHello(env, hello, parsed.init);
+        return r ? { ...r, viaStranger: true } : null;
       }
       const existing = this.sessions.get('strangerIn:' + bytesToHex(env.srcTag));
-      if (existing) return { ratchet: existing.ratchet, contactId: existing.contactId, sessionKey: 'strangerIn:' + bytesToHex(env.srcTag) };
+      if (existing) return { ratchet: existing.ratchet, contactId: existing.contactId, sessionKey: 'strangerIn:' + bytesToHex(env.srcTag), viaStranger: true };
       return null;
     }
-    // b) Our conversation tag (initiator side waiting for the reply).
+    // b) Our conversation tag (either side of a stranger conversation).
     for (const [key, sess] of this.sessions) {
       if (sess.conversationTag && bytesEqual(sess.conversationTag, env.dstTag)) {
-        return { ratchet: sess.ratchet, contactId: sess.contactId, sessionKey: key };
+        return { ratchet: sess.ratchet, contactId: sess.contactId, sessionKey: key, viaStranger: true };
       }
     }
-    // c) Pairwise tag -> contact.
+    // c) Pairwise tag -> contact. A pairwise-tagged message also proves the
+    // peer has switched off the conversation tag, completing the hand-off.
     const contact = await this.contactByTag(env.dstTag);
     if (contact) {
       const existing = this.sessions.get(contact.id);
       if (existing && !parsed.isInit) {
-        return { ratchet: existing.ratchet, contactId: contact.id, sessionKey: contact.id };
+        if (contact.strangerTag) {
+          contact.strangerTag = null;
+          await this.store.putContact(contact);
+          this.contactCache.set(contact.id, contact);
+        }
+        existing.conversationTag = undefined;
+        return { ratchet: existing.ratchet, contactId: contact.id, sessionKey: contact.id, viaStranger: false };
       }
       if (parsed.isInit && parsed.init) {
-        return await this.initFromPaired(contact, parsed.init);
+        const r = await this.initFromPaired(contact, parsed.init);
+        return r ? { ...r, viaStranger: false } : null;
       }
     }
     return null;
+  }
+
+  /**
+   * Session-init addressed to a tag we cannot map, but carrying a bundle id
+   * that matches OUR published paired bundle. This happens when the sender
+   * scanned our QR and we have no contact record for them yet: we hold the
+   * matching prekey secrets, so the X3DH attempt succeeds and the stranger
+   * handshake completes without any prior relationship.
+   */
+  private async tryUnmatchedInit(env: Envelope): Promise<{ ratchet: DoubleRatchet; contactId: null; sessionKey: string; viaStranger: boolean } | null> {
+    if (!this.prekeys) return null;
+    let parsed: ReturnType<typeof decodeSessionWire>;
+    try {
+      parsed = decodeSessionWire(env.payload);
+    } catch {
+      return null;
+    }
+    if (!parsed.isInit || !parsed.init) return null;
+    const myBundleId = bundleIdOf({
+      kind: 'paired',
+      dhPub: this.identity.dhPub,
+      spk: hexToBytes(this.prekeys.spkPub),
+      spkSig: new Uint8Array(0),
+      opk: null,
+      pqPk: hexToBytes(this.prekeys.pqPk),
+    });
+    if (!bytesEqual(parsed.init.bundleId, myBundleId)) return null;
+    const opkPriv = bytesEqual(parsed.init.opkHint, ZERO32) ? null : this.consumeOpk(parsed.init.opkHint);
+    const secrets: BundleSecrets = {
+      kind: 'paired',
+      spkPriv: hexToBytes(this.prekeys.spkPriv),
+      opkPriv,
+      pqSk: hexToBytes(this.prekeys.pqSk),
+      identityDhPriv: this.identity.dhPriv,
+    };
+    let shared: Uint8Array;
+    try {
+      shared = x3dhReceive(secrets, parsed.init).sharedSecret;
+    } catch {
+      return null;
+    }
+    const tempKey = 'strangerIn:' + bytesToHex(env.srcTag);
+    const ratchet = DoubleRatchet.initAsReceiver(shared, { priv: hexToBytes(this.prekeys.spkPriv), pub: hexToBytes(this.prekeys.spkPub) });
+    this.sessions.set(tempKey, { ratchet, contactId: null, createdAt: this.now() });
+    return { ratchet, contactId: null, sessionKey: tempKey, viaStranger: false };
   }
 
   /** New session from a paired contact's session-init header. */
@@ -970,12 +1059,14 @@ export class MeshNode {
     }
     const tempKey = 'strangerIn:' + bytesToHex(env.srcTag);
     const ratchet = DoubleRatchet.initAsReceiver(shared, { priv: hello.secrets.ephXPriv, pub: hello.secrets.ephX });
-    this.sessions.set(tempKey, { ratchet, contactId: null, createdAt: this.now() });
+    // conversationTag = the peer's conversation tag, so replies they send to
+    // their own tag still resolve here after this session is promoted.
+    this.sessions.set(tempKey, { ratchet, contactId: null, conversationTag: hexToBytes(tempKey.slice('strangerIn:'.length)), createdAt: this.now() });
     return { ratchet, contactId: null, sessionKey: tempKey };
   }
 
   private async acceptPlaintext(
-    ctx: { ratchet: DoubleRatchet; contactId: string | null; sessionKey: string | null },
+    ctx: { ratchet: DoubleRatchet; contactId: string | null; sessionKey: string | null; viaStranger: boolean },
     env: Envelope,
     plaintext: Uint8Array,
   ): Promise<void> {
@@ -1025,18 +1116,26 @@ export class MeshNode {
       if (payload.n && contact.name === 'Unknown' && payload.n) {
         contact.name = payload.n;
       }
-      await this.store.putContact(contact);
-      this.contactCache.set(senderId, contact);
     }
+    // Conversation-tag return address: while this is a stranger conversation
+    // (not yet on pairwise tags), replies go back under the peer's tag.
+    if (ctx.viaStranger && !contact.trusted) {
+      contact.strangerTag = bytesToHex(env.srcTag);
+    }
+    await this.store.putContact(contact);
+    this.contactCache.set(senderId, contact);
     if (contact.blocked) return;
 
-    // Promote stranger temp session to the verified contact session.
+    // Promote stranger temp session to the contact session, keeping the
+    // conversation tag so both sides can still address each other by it.
     if (ctx.sessionKey && ctx.sessionKey.startsWith('stranger')) {
+      const prev = this.sessions.get(ctx.sessionKey);
       this.sessions.delete(ctx.sessionKey);
       ctx.sessionKey = senderId;
       ctx.contactId = senderId;
-      this.sessions.set(senderId, { ratchet: ctx.ratchet, contactId: senderId, createdAt: this.now() });
+      this.sessions.set(senderId, { ratchet: ctx.ratchet, contactId: senderId, conversationTag: prev?.conversationTag, createdAt: this.now() });
       await this.store.putSession(senderId, ctx.ratchet.serialize());
+      if (prev?.conversationTag) this.convTagToContact.set(bytesToHex(prev.conversationTag), senderId);
     }
 
     const status: MessageStatus = contact.trusted ? 'delivered' : 'request';
@@ -1161,6 +1260,21 @@ export class MeshNode {
   /** Test/simulator hook: run gossip push immediately. */
   async gossip(): Promise<void> {
     await this.pushToPeers();
+  }
+
+  /** Diagnostic: hex tags of peer HELLO bundles we have learned (no contents). */
+  peerHelloTags(): string[] {
+    return [...this.peerHelloBundles.keys()];
+  }
+
+  /** Diagnostic: hex tags of our own advertised HELLO addresses. */
+  ownHelloTags(): string[] {
+    return [...this.helloTags.keys()];
+  }
+
+  /** Diagnostic: whether a hex tag is one of our own advertised HELLO addresses. */
+  ownsHelloTag(tagHex: string): boolean {
+    return this.helloTags.has(tagHex);
   }
 
   // ------------------------------------------------------------- contacts

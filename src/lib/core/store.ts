@@ -48,6 +48,11 @@ export interface ContactRecord {
   blocked: boolean;
   /** Identity verified in person (safety number compared). */
   verified: boolean;
+  /**
+   * Hex conversation tag (stranger return address) while this contact is a
+   * non-paired conversation; cleared once both sides are on pairwise tags.
+   */
+  strangerTag?: string | null;
   lastSeen: number;
   addedAt: number;
 }

@@ -522,9 +522,11 @@ export function sessionEncrypt(
   const body = ratchet.encrypt(plaintext, ad);
   if (initHeader) {
     const h = encodeSessionInitHeader(initHeader);
-    return { wire: concat(u32le(1), h, body), usedInit: true };
+    // Explicit body length: envelopes are bucket-padded, so the receiver must
+    // know where the ratchet body ends inside the padded payload.
+    return { wire: concat(u32le(1), u32le(h.length + body.length), h, body), usedInit: true };
   }
-  return { wire: concat(u32le(0), body), usedInit: false };
+  return { wire: concat(u32le(0), u32le(body.length), body), usedInit: false };
 }
 
 export function encodeSessionInitHeader(h: SessionInitHeader): Uint8Array {
@@ -548,14 +550,17 @@ export function decodeSessionInitHeader(buf: Uint8Array): SessionInitHeader {
 }
 
 export function decodeSessionWire(wire: Uint8Array): { isInit: boolean; init: SessionInitHeader | null; body: Uint8Array } {
-  if (wire.length < 4) throw new Error('bad session wire');
+  if (wire.length < 8) throw new Error('bad session wire');
   const isInit = readU32le(wire, 0) === 1;
+  const bodyLen = readU32le(wire, 4);
+  if (8 + bodyLen > wire.length) throw new Error('bad session wire body length');
   if (isInit) {
     const headerLen = 8 + 32 + 32 + 32 + KEM_CT_LEN;
-    const init = decodeSessionInitHeader(wire.slice(4, 4 + headerLen));
-    return { isInit, init, body: wire.slice(4 + headerLen) };
+    if (bodyLen < headerLen) throw new Error('bad session wire init length');
+    const init = decodeSessionInitHeader(wire.slice(8, 8 + headerLen));
+    return { isInit, init, body: wire.slice(8 + headerLen, 8 + bodyLen) };
   }
-  return { isInit: false, init: null, body: wire.slice(4) };
+  return { isInit: false, init: null, body: wire.slice(8, 8 + bodyLen) };
 }
 
 // --------------------------------------------------- pairwise secrets and tags
