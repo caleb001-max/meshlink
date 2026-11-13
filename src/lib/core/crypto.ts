@@ -218,13 +218,15 @@ const ZERO32 = new Uint8Array(32);
 /** Sender side. `identity` signs nothing here; it only supplies DH1 for paired bundles. */
 export function x3dhInitiate(identity: Identity | null, bundle: Bundle): SessionInit {
   const ek = x25519.keygen();
-  const dhA1 = x25519.keygen();
   let ikm: Uint8Array;
   let recipientDhPub: Uint8Array;
   let opkHint: Uint8Array;
+  let kemCt: Uint8Array;
+  let dhA1Pub: Uint8Array; // public key the receiver must DH against for DH1
   if (bundle.kind === 'paired') {
     if (!identity) throw new Error('paired bundles require an identity');
     assertLen(bundle.spk, X25519_LEN, 'spk');
+    // Signal X3DH: DH1=DH(IK_A,SPK_B) DH2=DH(EK_A,IK_B) DH3=DH(EK_A,SPK_B) DH4=DH(EK_A,OPK_B)
     const dh1 = x25519.getSharedSecret(identity.dhPriv, bundle.spk);
     const dh2 = x25519.getSharedSecret(ek.secretKey, bundle.dhPub);
     const dh3 = x25519.getSharedSecret(ek.secretKey, bundle.spk);
@@ -233,9 +235,11 @@ export function x3dhInitiate(identity: Identity | null, bundle: Bundle): Session
     ikm = concat(F, dh1, dh2, dh3, dh4, enc.sharedSecret);
     recipientDhPub = bundle.spk;
     opkHint = bundle.opk ?? ZERO32;
-    var kemCt = enc.cipherText;
+    kemCt = enc.cipherText;
+    dhA1Pub = identity.dhPub;
   } else {
     assertLen(bundle.ephX, X25519_LEN, 'ephX');
+    const dhA1 = x25519.keygen();
     const dh1 = x25519.getSharedSecret(dhA1.secretKey, bundle.ephX);
     const dh2 = x25519.getSharedSecret(ek.secretKey, bundle.ephX);
     const enc = ml_kem768.encapsulate(bundle.ephPq);
@@ -243,10 +247,11 @@ export function x3dhInitiate(identity: Identity | null, bundle: Bundle): Session
     recipientDhPub = bundle.ephX;
     opkHint = ZERO32;
     kemCt = enc.cipherText;
+    dhA1Pub = dhA1.publicKey;
   }
   const sk = hkdfSha256(ikm, new Uint8Array(32), utf8(X3DH_INFO), 32);
   return {
-    header: { bundleId: bundleId(bundle), dhA1: dhA1.publicKey, ekA: ek.publicKey, opkHint, kemCt },
+    header: { bundleId: bundleId(bundle), dhA1: dhA1Pub, ekA: ek.publicKey, opkHint, kemCt },
     sharedSecret: sk,
     recipientDhPub,
   };
@@ -426,11 +431,12 @@ export class DoubleRatchet {
     if (!this.state.cks) throw new Error('send chain not ready');
     const [mk, next] = kdfCk(this.state.cks);
     this.state.cks = next;
-    const header = encodeRatchetHeader({ dh: this.state.dhPub, pn: this.state.pn, n: this.state.ns });
-    this.state.ns += 1;
+    const n = this.state.ns;
+    const header = encodeRatchetHeader({ dh: this.state.dhPub, pn: this.state.pn, n });
     const nonce = new Uint8Array(12).fill(0);
-    nonce.set(u32le(this.state.ns >>> 0), 0);
+    nonce.set(u32le(n >>> 0), 0);
     nonce.set(u32le(1), 8);
+    this.state.ns = n + 1;
     const ct = chacha20poly1305(mk, nonce, concat(ad, header)).encrypt(plaintext);
     return concat(header, ct);
   }
@@ -443,7 +449,7 @@ export class DoubleRatchet {
     const skippedMk = this.state.skipped[skKey];
     if (skippedMk) {
       delete this.state.skipped[skKey];
-      return this.aeadOpen(skippedMk, ct, ad, header, header.n);
+      return this.aeadOpen(b64ToBytes(skippedMk), ct, ad, header, header.n);
     }
     if (header.dh.length !== 32) throw new Error('bad header dh');
     if (!this.state.dhRemote || !bytesEqual(header.dh, this.state.dhRemote)) {
@@ -455,14 +461,14 @@ export class DoubleRatchet {
     const [mk, next] = kdfCk(this.state.ckr);
     this.state.ckr = next;
     this.state.nr += 1;
-    return this.aeadOpen(bytesToB64(mk), ct, ad, header, header.n - 1);
+    return this.aeadOpen(mk, ct, ad, header, header.n);
   }
 
-  private aeadOpen(mkB64: string, ct: Uint8Array, ad: Uint8Array, header: RatchetHeader, counter: number): Uint8Array {
+  private aeadOpen(mk: Uint8Array, ct: Uint8Array, ad: Uint8Array, header: RatchetHeader, counter: number): Uint8Array {
     const nonce = new Uint8Array(12).fill(0);
     nonce.set(u32le(counter >>> 0), 0);
     nonce.set(u32le(1), 8);
-    return chacha20poly1305(b64ToBytes(mkB64), nonce, concat(ad, encodeRatchetHeader(header))).decrypt(ct);
+    return chacha20poly1305(mk, nonce, concat(ad, encodeRatchetHeader(header))).decrypt(ct);
   }
 
   private skipKeys(until: number): void {
@@ -487,16 +493,9 @@ export class DoubleRatchet {
     this.state.ns = 0;
     this.state.nr = 0;
     this.state.dhRemote = header.dh;
-    if (!this.state.ckr) {
-      // First-ever receive: derive from own bundle key against sender's key.
-      const [rk, ckr] = kdfRk(this.state.rk, x25519.getSharedSecret(this.state.dhPriv, header.dh));
-      this.state.rk = rk;
-      this.state.ckr = ckr;
-    } else {
-      const [rk, ckr] = kdfRk(this.state.rk, x25519.getSharedSecret(this.state.dhPriv, header.dh));
-      this.state.rk = rk;
-      this.state.ckr = ckr;
-    }
+    const [rk, ckr] = kdfRk(this.state.rk, x25519.getSharedSecret(this.state.dhPriv, header.dh));
+    this.state.rk = rk;
+    this.state.ckr = ckr;
     const dh = x25519.keygen();
     this.state.dhPriv = dh.secretKey;
     this.state.dhPub = dh.publicKey;

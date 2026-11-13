@@ -187,15 +187,16 @@ export class LinkCodec {
   push(raw: Uint8Array): void {
     this.rxBuffer = concat(this.rxBuffer, raw);
     for (;;) {
-      if (this.rxBuffer.length < 2) return;
+      // Frame layout: len(2) || ctr(8) || ct(len bytes) -> total 10 + len.
+      if (this.rxBuffer.length < 10) return;
       const len = readU16le(this.rxBuffer, 0);
       if (len > MAX_FRAME) {
         this.onError(new Error('frame too large'));
         return;
       }
-      if (this.rxBuffer.length < 2 + len) return;
-      const frame = this.rxBuffer.slice(0, 2 + len);
-      this.rxBuffer = this.rxBuffer.slice(2 + len);
+      if (this.rxBuffer.length < 10 + len) return;
+      const frame = this.rxBuffer.slice(0, 10 + len);
+      this.rxBuffer = this.rxBuffer.slice(10 + len);
       try {
         const pt = openFrame(this.keys, this.direction === 'c2s' ? 's2c' : 'c2s', this.rxCounter, frame);
         this.rxCounter += 1;

@@ -35,15 +35,17 @@ export function bytesToB64(bytes: Uint8Array): string {
     out += B64[(n >> 18) & 63] + B64[(n >> 12) & 63] + '==';
   } else if (rem === 2) {
     const n = (bytes[i] << 16) | (bytes[i + 1] << 8);
-    out += B64[(n >> 18) & 63] + B64[(n >> 12) & 63] + B64[(n >> 6) & 63] + B64[n & 63];
+    out += B64[(n >> 18) & 63] + B64[(n >> 12) & 63] + B64[(n >> 6) & 63] + '=';
   }
   return out;
 }
 
 export function b64ToBytes(s: string): Uint8Array {
   const t = s.replace(/[^A-Za-z0-9+/]/g, '');
-  const pad = s.endsWith('==') ? 2 : s.endsWith('=') ? 1 : 0;
-  const out = new Uint8Array(Math.floor((t.length * 3) / 4) - pad);
+  const rem = t.length % 4;
+  if (rem === 1) throw new Error('bad base64');
+  const outLen = rem === 0 ? (t.length / 4) * 3 : ((t.length - rem) / 4) * 3 + (rem - 1);
+  const out = new Uint8Array(outLen);
   let p = 0;
   for (let i = 0; i < t.length; i += 4) {
     const e0 = B64.indexOf(t[i]);

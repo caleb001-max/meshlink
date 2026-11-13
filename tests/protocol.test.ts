@@ -8,6 +8,7 @@ import fc from 'fast-check';
 import {
   Envelope,
   FRAG_HEADER_LEN,
+  InventoryEntry,
   HEADER_LEN,
   MAGIC,
   PRIO_MEDIA,
