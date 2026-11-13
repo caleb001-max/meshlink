@@ -28,7 +28,7 @@ Anonymous downloads only work from a public repo. If the repo is private,
 every phone must be signed in to GitHub before the link works.
 
 ```bash
-git remote add origin https://github.com/<you>/<repo>.git
+git remote add origin https://github.com/caleb001-max/meshlink.git
 git push -u origin master
 ```
 
@@ -36,7 +36,7 @@ git push -u origin master
 
 Web UI (works entirely in Chrome, no tools to install):
 
-1. Open `https://github.com/<you>/<repo>/releases/new`.
+1. Open `https://github.com/caleb001-max/meshlink/releases/new`.
 2. Tag: `v1.0.0`. Title: `MeshLink 1.0.0 (Android preview)`.
 3. Drag `meshlink.apk` into the assets box. **Name it exactly
    `meshlink.apk`** - the stable link below depends on that name.
@@ -60,7 +60,7 @@ Never commit the APK - `.gitignore` already excludes `*.apk`, `*.aab`, `*.ipa`.
 Stable link, always points at the newest release asset with that name:
 
 ```
-https://github.com/<you>/<repo>/releases/latest/download/meshlink.apk
+https://github.com/caleb001-max/meshlink/releases/latest/download/meshlink.apk
 ```
 
 Open it in Chrome on the phone. Chrome saves the file to its downloads

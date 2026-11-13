@@ -55,10 +55,10 @@ npm run build:android             # ~10-20 min cloud build, prints a download UR
 Then publish the downloaded APK as a **GitHub Release** so the phone gets a
 stable Chrome download link:
 
-1. `https://github.com/<you>/<repo>/releases/new`, tag `v1.0.0`.
+1. `https://github.com/caleb001-max/meshlink/releases/new`, tag `v1.0.0`.
 2. Upload the APK named exactly `meshlink.apk`, publish.
 3. Open in Chrome on the phone:
-   `https://github.com/<you>/<repo>/releases/latest/download/meshlink.apk`
+   `https://github.com/caleb001-max/meshlink/releases/latest/download/meshlink.apk`
 
 Allow "install unknown apps" for Chrome, install, open **Calculator**, set
 an unlock code (3–8 digits + operator, e.g. `1337%`), then type it to reveal
