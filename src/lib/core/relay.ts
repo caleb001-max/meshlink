@@ -125,16 +125,35 @@ export class DedupSet {
 /**
  * Randomized relay delay + counter-based suppression state for a message.
  * A relay forwards only after a short random jitter and only if it has not
- * observed too many other relays already carrying the message (from
- * inventories). This is the classic broadcast-storm counter threshold.
+ * observed too many OTHER relays already carrying the message. Relays are
+ * counted as DISTINCT peers (from inventories, keyed by peer link tag) so a
+ * peer repeating its inventory does not inflate the counter; observations
+ * without a peer identity count individually. This is the classic
+ * broadcast-storm counter threshold.
  */
 export class SuppressionState {
-  private relayCount = new Map<string, number>();
+  private relayPeers = new Map<string, Set<string>>();
+  private anonCount = new Map<string, number>();
   private deadline = new Map<string, number>();
 
-  observeRelay(msgId: Uint8Array): void {
+  observeRelay(msgId: Uint8Array, peerKey?: string): void {
     const key = bytesToHex(msgId);
-    this.relayCount.set(key, (this.relayCount.get(key) ?? 0) + 1);
+    if (peerKey) {
+      let set = this.relayPeers.get(key);
+      if (!set) {
+        set = new Set();
+        this.relayPeers.set(key, set);
+      }
+      set.add(peerKey);
+    } else {
+      this.anonCount.set(key, (this.anonCount.get(key) ?? 0) + 1);
+    }
+  }
+
+  /** Total suppression counter for this message: distinct peers + anonymous. */
+  relayCountFor(msgId: Uint8Array): number {
+    const key = bytesToHex(msgId);
+    return (this.relayPeers.get(key)?.size ?? 0) + (this.anonCount.get(key) ?? 0);
   }
 
   /** True once the random delay passed and copies seen < threshold. */
@@ -145,7 +164,7 @@ export class SuppressionState {
       if (now < dl) return false;
       this.deadline.delete(key);
     }
-    return (this.relayCount.get(key) ?? 0) < threshold;
+    return this.relayCountFor(msgId) < threshold;
   }
 
   startJitter(msgId: Uint8Array, maxMs = 400, now = Date.now()): void {
@@ -155,7 +174,8 @@ export class SuppressionState {
 
   prune(now = Date.now()): void {
     for (const [key, dl] of this.deadline) if (now > dl + 5000) this.deadline.delete(key);
-    if (this.relayCount.size > 5000) this.relayCount.clear();
+    if (this.relayPeers.size > 5000) this.relayPeers.clear();
+    if (this.anonCount.size > 5000) this.anonCount.clear();
   }
 }
 

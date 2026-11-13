@@ -180,6 +180,10 @@ export interface MeshNodeOptions {
   circleKeys?: Uint8Array[];
   now?: () => number;
   helloIntervalMs?: number;
+  /** Simulator/testing: do not start the real 15s interval; the host drives tick()/gossip(). */
+  noTimers?: boolean;
+  /** Max simultaneously held HELLO addresses (dense/churn scenarios may raise this). */
+  helloTagCapacity?: number;
 }
 
 export interface NodeSnapshot {
@@ -240,10 +244,12 @@ export class MeshNode {
   private pendingAcks = new Map<string, { ids: string[]; srcTag: Uint8Array }>();
   private helloTimer: ReturnType<typeof setInterval> | null = null;
   private helloIntervalMs: number;
+  private helloTagCapacity: number;
   private lastHelloAt = 0;
   private nowFn: () => number;
   private circleKeys: Uint8Array[];
   private started = false;
+  private noTimers: boolean;
   private contactCache = new Map<string, ContactRecord>();
   private prekeys: OwnPrekeys | null = null;
   private retried = new Set<string>();
@@ -258,6 +264,8 @@ export class MeshNode {
     this.circleKeys = opts.circleKeys ?? [];
     this.nowFn = opts.now ?? (() => Date.now());
     this.helloIntervalMs = opts.helloIntervalMs ?? 10 * 60 * 1000;
+    this.helloTagCapacity = opts.helloTagCapacity ?? 64;
+    this.noTimers = opts.noTimers ?? false;
     this.queue = new OutboundQueue(this.policy, {});
   }
 
@@ -276,7 +284,7 @@ export class MeshNode {
     await this.loadContacts();
     await this.restoreSessions();
     await this.restoreQueue();
-    this.helloTimer = setInterval(() => this.tick(), 15_000);
+    if (!this.noTimers) this.helloTimer = setInterval(() => this.tick(), 15_000);
     await this.broadcastHello();
   }
 
@@ -485,9 +493,9 @@ export class MeshNode {
     for (const [tagHex, rec] of this.helloTags) {
       if (rec.createdAt < cutoff) this.helloTags.delete(tagHex);
     }
-    if (this.helloTags.size > 64) {
+    if (this.helloTags.size > this.helloTagCapacity) {
       const oldest = [...this.helloTags.entries()].sort((a, b) => a[1].createdAt - b[1].createdAt);
-      for (const [k] of oldest.slice(0, oldest.length - 64)) this.helloTags.delete(k);
+      for (const [k] of oldest.slice(0, oldest.length - this.helloTagCapacity)) this.helloTags.delete(k);
     }
     const peerCutoff = this.now() - 3600_000;
     for (const [tagHex, rec] of this.peerHelloBundles) {
@@ -865,7 +873,13 @@ export class MeshNode {
     } catch {
       return;
     }
-    for (const e of entries) this.suppression.observeRelay(e.msgId);
+    for (const e of entries) {
+      // Count DISTINCT relay peers so repeated inventories from the same
+      // neighbor do not inflate the broadcast-storm counter.
+      const link = this.links.get(linkId);
+      const peerKey = link?.peerTag ? bytesToHex(link.peerTag) : linkId;
+      this.suppression.observeRelay(e.msgId, peerKey);
+    }
 
     const mine = await this.filterMyTags(entries.map((e) => e.dstTag));
     const mineSet = new Set(mine.map(bytesToHex));
