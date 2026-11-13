@@ -3,11 +3,12 @@
 // automatically whenever the app goes to the background.
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
 import { AppState } from 'react-native';
+import * as SecureStore from 'expo-secure-store';
+import * as SQLite from 'expo-sqlite';
 import { useRouter } from 'expo-router';
 import { getPasscodeHash, setPasscodeHash, wipeSettings } from './settings';
-import { hashPasscode, wipeIdentity } from './crypto';
-import { wipeDatabase } from './db';
-import { mesh } from './mesh';
+import { hashPasscode } from './passcode';
+import { engine } from './engine';
 
 export const PASSCODE_OPERATORS = ['÷', '×', '−', '+', '%'] as const;
 export type PasscodeOperator = (typeof PASSCODE_OPERATORS)[number];
@@ -54,7 +55,7 @@ export function LockProvider({ children }: { children: ReactNode }) {
   const setCode = async (name: string, code: string) => {
     if (!isValidPasscode(code)) throw new Error('Invalid passcode');
     await setPasscodeHash(hashPasscode(code));
-    await mesh.setName(name);
+    await engine.setName(name);
     setHasCode(true);
     setUnlocked(true);
   };
@@ -68,10 +69,18 @@ export function LockProvider({ children }: { children: ReactNode }) {
   };
 
   const wipe = async () => {
-    mesh.stop();
-    await wipeDatabase();
+    await engine.wipe();
+    try {
+      await SQLite.deleteDatabaseAsync('chimera.db');
+    } catch {
+      /* no database from an older build */
+    }
     await wipeSettings();
-    await wipeIdentity();
+    try {
+      await SecureStore.deleteItemAsync('chimera.keys.v1');
+    } catch {
+      /* no legacy identity */
+    }
     setHasCode(false);
     setUnlocked(false);
   };

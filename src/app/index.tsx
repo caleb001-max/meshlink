@@ -13,6 +13,8 @@ import {
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useLock, PASSCODE_OPERATORS, isValidPasscode } from '@/lib/lock';
+import { ActionButton, Screen } from '@/components/ui';
+import { colors, radius, type } from '@/lib/theme';
 
 const MAX_ENTRY = 12;
 
@@ -124,22 +126,24 @@ export default function CalculatorScreen() {
   }
 
   return (
-    <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.container}>
-      <View style={styles.displayWrap}>
-        <Text style={styles.display} numberOfLines={1} adjustsFontSizeToFit>
-          {display}
-        </Text>
-      </View>
-      <View style={styles.pad}>
-        {ROWS.map((row, i) => (
-          <View key={i} style={styles.row}>
-            {row.map((key) => (
-              <CalcButton key={key} label={key} onPress={() => press(key)} />
-            ))}
-          </View>
-        ))}
-      </View>
-    </KeyboardAvoidingView>
+    <Screen>
+      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.container}>
+        <View style={styles.displayWrap}>
+          <Text style={styles.display} numberOfLines={1} adjustsFontSizeToFit>
+            {display}
+          </Text>
+        </View>
+        <View style={styles.pad}>
+          {ROWS.map((row, i) => (
+            <View key={i} style={styles.row}>
+              {row.map((key) => (
+                <CalcButton key={key} label={key} onPress={() => press(key)} />
+              ))}
+            </View>
+          ))}
+        </View>
+      </KeyboardAvoidingView>
+    </Screen>
   );
 }
 
@@ -149,15 +153,17 @@ function CalcButton({ label, onPress }: { label: string; onPress: () => void }) 
   return (
     <Pressable
       onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={label}
       style={({ pressed }) => [
         styles.btn,
-        isOp && styles.btnOp,
         isFn && styles.btnFn,
+        isOp && styles.btnOp,
         label === '0' && styles.btnWide,
-        pressed && { opacity: 0.7 },
+        pressed && { opacity: 0.72 },
       ]}
     >
-      <Text style={[styles.btnText, (isOp || isFn) && styles.btnTextLight]}>{label}</Text>
+      <Text style={[styles.btnText, isOp && styles.btnTextOnFlame]}>{label}</Text>
     </Pressable>
   );
 }
@@ -187,8 +193,13 @@ function Onboarding() {
   };
 
   return (
-    <View style={[styles.container, styles.onboard]}>
-      <Text style={styles.onboardTitle}>Welcome</Text>
+    <Screen>
+      <View style={styles.onboard}>
+        <View style={styles.mark}>
+          <View style={styles.markDot} />
+          <View style={styles.markLine} />
+        </View>
+        <Text style={styles.onboardTitle}>Welcome</Text>
       <Text style={styles.onboardSub}>
         Set the display name your contacts will see, and the secret code that opens
         this app from the calculator (3–8 digits + an operator, e.g. 1337%).
@@ -196,15 +207,16 @@ function Onboarding() {
       <TextInput
         style={styles.input}
         placeholder="Display name"
-        placeholderTextColor="#666"
+        placeholderTextColor={colors.faint}
         value={name}
         onChangeText={setName}
         maxLength={20}
+        autoCapitalize="words"
       />
       <TextInput
         style={styles.input}
         placeholder="Secret digits (e.g. 1337)"
-        placeholderTextColor="#666"
+        placeholderTextColor={colors.faint}
         value={digits}
         onChangeText={(t) => setDigits(t.replace(/[^0-9]/g, '').slice(0, 8))}
         keyboardType="number-pad"
@@ -217,63 +229,74 @@ function Onboarding() {
             onPress={() => setOpChar(o)}
             style={[styles.opChip, opChar === o && styles.opChipActive]}
           >
-            <Text style={styles.opChipText}>{o}</Text>
+            <Text style={[styles.opChipText, opChar === o && styles.opChipTextActive]}>{o}</Text>
           </Pressable>
         ))}
       </View>
       <Text style={styles.preview}>Your unlock code: {code || '—'}</Text>
       {!!error && <Text style={styles.error}>{error}</Text>}
-      <Pressable style={[styles.saveBtn, !valid && styles.saveBtnDisabled]} onPress={() => void save()}>
-        <Text style={styles.saveBtnText}>Save & continue</Text>
-      </Pressable>
-    </View>
+      <ActionButton label="Save & continue" onPress={() => void save()} disabled={!valid} style={styles.saveBtn} />
+      <Text style={styles.legal}>
+        No account, no server, no internet required. Messages travel device to device.
+      </Text>
+      </View>
+    </Screen>
   );
 }
 
-const KEY_BG = '#1c1c1e';
-
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#000', justifyContent: 'flex-end' },
-  displayWrap: { paddingHorizontal: 24, paddingBottom: 12, paddingTop: 80, alignItems: 'flex-end' },
-  display: { color: '#fff', fontSize: 64, fontWeight: '300' },
-  pad: { padding: 12, gap: 12 },
+  container: { flex: 1, justifyContent: 'flex-end' },
+  displayWrap: { paddingHorizontal: 26, paddingBottom: 14, paddingTop: 40, alignItems: 'flex-end' },
+  display: { color: colors.softWhite, fontSize: 68, fontWeight: '300', letterSpacing: -1 },
+  pad: { padding: 12, gap: 12, paddingBottom: 28 },
   row: { flexDirection: 'row', gap: 12 },
   btn: {
     flex: 1,
-    aspectRatio: 1.25,
-    borderRadius: 999,
-    backgroundColor: KEY_BG,
+    aspectRatio: 1.22,
+    borderRadius: radius.pill,
+    backgroundColor: colors.raised,
     alignItems: 'center',
     justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: colors.line,
   },
   btnWide: { flex: 2.3 },
-  btnOp: { backgroundColor: '#ff9f0a' },
-  btnFn: { backgroundColor: '#2c2c2e' },
-  btnText: { color: '#fff', fontSize: 28, fontWeight: '400' },
-  btnTextLight: { color: '#fff', fontWeight: '600' },
-  onboard: { justifyContent: 'center', padding: 28, gap: 14 },
-  onboardTitle: { color: '#fff', fontSize: 28, fontWeight: '700' },
-  onboardSub: { color: '#9a9aa0', fontSize: 14, lineHeight: 20, marginBottom: 10 },
+  btnOp: { backgroundColor: colors.flame, borderColor: colors.flame },
+  btnFn: { backgroundColor: colors.surface, borderColor: colors.line },
+  btnText: { color: colors.softWhite, fontSize: 28, fontWeight: '400' },
+  btnTextOnFlame: { color: colors.jetBlack, fontWeight: '600' },
+  onboard: { flex: 1, justifyContent: 'center', padding: 28, gap: 14 },
+  mark: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 6 },
+  markDot: { width: 14, height: 14, borderRadius: 7, backgroundColor: colors.flame },
+  markLine: { width: 38, height: 2, backgroundColor: colors.flame, opacity: 0.5 },
+  onboardTitle: { ...type.display, color: colors.softWhite },
+  onboardSub: { color: colors.muted, fontSize: 14, lineHeight: 21, marginBottom: 6 },
   input: {
-    backgroundColor: KEY_BG,
-    color: '#fff',
-    borderRadius: 12,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.line,
+    color: colors.softWhite,
+    borderRadius: radius.sm,
     paddingHorizontal: 16,
     paddingVertical: 14,
     fontSize: 16,
   },
   opRow: { flexDirection: 'row', gap: 10 },
   opChip: {
-    paddingHorizontal: 18,
-    paddingVertical: 10,
-    borderRadius: 999,
-    backgroundColor: KEY_BG,
+    width: 52,
+    height: 48,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: radius.sm,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.line,
   },
-  opChipActive: { backgroundColor: '#ff9f0a' },
-  opChipText: { color: '#fff', fontSize: 18 },
-  preview: { color: '#8e8e93', fontSize: 13 },
-  error: { color: '#ff453a', fontSize: 13 },
-  saveBtn: { backgroundColor: '#0a84ff', borderRadius: 12, paddingVertical: 14, alignItems: 'center' },
-  saveBtnDisabled: { opacity: 0.4 },
-  saveBtnText: { color: '#fff', fontWeight: '600', fontSize: 16 },
+  opChipActive: { backgroundColor: colors.flameWash, borderColor: colors.flame },
+  opChipText: { color: colors.muted, fontSize: 18 },
+  opChipTextActive: { color: colors.flame, fontWeight: '700' },
+  preview: { color: colors.faint, fontSize: 13 },
+  error: { color: colors.danger, fontSize: 13 },
+  saveBtn: { marginTop: 4 },
+  legal: { color: colors.faint, fontSize: 11, textAlign: 'center', marginTop: 6, lineHeight: 16 },
 });

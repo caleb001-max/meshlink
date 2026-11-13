@@ -11,14 +11,13 @@
       "supportsTablet": false,
       "bundleIdentifier": "com.chimera.calculator",
       "infoPlist": {
-        "NSLocalNetworkUsageDescription": "This calculator uses the local network to sync data between your own devices.",
-        "NSBluetoothAlwaysUsageDescription": "This calculator uses Bluetooth to sync data between your own devices."
+        "NSLocalNetworkUsageDescription": "This calculator uses the local network to sync data between your own devices."
       }
     },
     "android": {
       "package": "com.chimera.calculator",
       "adaptiveIcon": {
-        "backgroundColor": "#1c1c1e",
+        "backgroundColor": "#050506",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
@@ -46,7 +45,6 @@
         }
       ],
       "expo-sqlite",
-      "react-native-ble-plx",
       [
         "expo-secure-store",
         {

@@ -1,38 +1,41 @@
-// Mesh status + peer discovery. Shows LAN/Bluetooth status, scans the local
-// subnet for other Chimera nodes, and allows manual IP connection.
 import { useEffect, useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useRouter } from 'expo-router';
-import { useSyncExternalStore } from 'react';
 import { useRequireUnlocked } from '@/lib/lock';
-import { mesh } from '@/lib/mesh';
-import { subscribeMesh } from '@/lib/hooks';
-import { listPeers, type Peer } from '@/lib/db';
+import { engine } from '@/lib/engine';
+import { useEngineSnapshot } from '@/lib/hooks';
+import { ActionButton, Card, Header, Pill, Screen, SectionLabel, ui } from '@/components/ui';
+import { colors, radius, space, type } from '@/lib/theme';
 
 export default function NearbyScreen() {
   const ready = useRequireUnlocked();
   const router = useRouter();
-  useSyncExternalStore(subscribeMesh, () => mesh.version);
-
-  const snap = mesh.getSnapshot();
-  const [peers, setPeers] = useState<Peer[]>([]);
+  const snap = useEngineSnapshot();
   const [manualIp, setManualIp] = useState('');
   const [scanning, setScanning] = useState(false);
+  const [sending, setSending] = useState<string | null>(null);
 
   useEffect(() => {
-    void listPeers().then(setPeers);
-  }, [mesh.version]);
+    if (!ready) return;
+    void engine.start().catch(() => {});
+  }, [ready]);
 
   if (!ready) return null;
+
+  const tags = engine.nearbyTags();
 
   const scan = async () => {
     setScanning(true);
     try {
-      const found = await mesh.lan.scanSubnet();
-      await mesh.sendHello();
-      Alert.alert('Scan complete', `${found} device(s) found on your local network.`);
+      const found = await engine.scanLan();
+      Alert.alert(
+        'Scan complete',
+        found > 0
+          ? `${found} link(s) open. Anonymous devices appear below after their next hello.`
+          : 'No devices answered. Both phones must be on the same Wi-Fi or hotspot.',
+      );
     } catch {
-      Alert.alert('Scan failed', 'Connect to Wi-Fi or a personal hotspot first.');
+      Alert.alert('Scan failed', 'Wi-Fi must be on for LAN discovery. Bluetooth is not active in this build.');
     } finally {
       setScanning(false);
     }
@@ -41,134 +44,140 @@ export default function NearbyScreen() {
   const connectManual = async () => {
     const ip = manualIp.trim();
     if (!ip) return;
-    const ok = await mesh.lan.connectTo(ip);
+    const ok = await engine.linkTo(ip);
     if (ok) {
-      await mesh.sendHello();
-      Alert.alert('Connected', `Linked with ${ip}.`);
       setManualIp('');
+      await engine.announce();
+      Alert.alert('Link opened', `Secure link established with ${ip}.`);
     } else {
-      Alert.alert('No response', `Nothing answered on port ${snap.port} at ${ip}.`);
+      Alert.alert('No response', `Nothing answered on port ${snap.lan.port} at ${ip}.`);
     }
   };
 
-  const bleLabel: Record<string, string> = {
-    off: 'off',
-    starting: 'starting…',
-    scanning: 'scanning',
-    unavailable: 'unavailable',
+  const sayHello = async (tag: string) => {
+    setSending(tag);
+    try {
+      await engine.sendIntro(tag, 'Hello from MeshLink');
+      Alert.alert(
+        'Hello queued',
+        'Sealed for that nearby device. If they accept, a message request appears in Chats. This is not a live chat session yet.',
+      );
+    } catch (err) {
+      Alert.alert('Hello not sent', err instanceof Error ? err.message : 'The device may be out of range.');
+    } finally {
+      setSending(null);
+    }
   };
 
   return (
-    <View style={styles.container}>
-      <View style={styles.header}>
-        <Pressable onPress={() => router.back()} style={styles.backBtn}>
-          <Text style={styles.backText}>‹</Text>
+    <Screen>
+      <Header title="Nearby" subtitle="Same network, no directory" onBack={() => router.back()} />
+      <ScrollView contentContainerStyle={styles.content}>
+        <Card>
+          <View style={styles.statusRow}>
+            <Text style={styles.cardTitle}>Wi-Fi / hotspot</Text>
+            <Pill label={snap.lan.running ? 'LISTENING' : 'OFF'} tone={snap.lan.running ? 'flame' : 'neutral'} />
+          </View>
+          <Text style={ui.muted}>
+            {snap.lan.running
+              ? `${snap.lan.ip ?? 'No address yet'} · port ${snap.lan.port} · ${snap.lan.peers} socket(s)`
+              : 'LAN listener is off. Turn on Wi-Fi and unlock the app.'}
+          </Text>
+          <View style={styles.row}>
+            <ActionButton
+              label={scanning ? 'Scanning…' : 'Scan local network'}
+              onPress={() => void scan()}
+              disabled={scanning}
+              style={styles.flex}
+            />
+            <ActionButton label="Pair by QR" kind="ghost" onPress={() => router.push('/pair')} style={styles.flex} />
+          </View>
+        </Card>
+
+        <Card style={styles.honestCard}>
+          <Text style={styles.cardTitle}>Bluetooth</Text>
+          <Text style={ui.muted}>
+            Not active in this build. Advertised Bluetooth range and battery claims do not apply until the peripheral
+            path is verified on hardware. Wi-Fi/hotspot is the working transport.
+          </Text>
+        </Card>
+
+        <SectionLabel>Anonymous devices</SectionLabel>
+        <Card>
+          {tags.length === 0 ? (
+            <Text style={ui.muted}>
+              No hellos observed. Run a scan, keep both devices on the same network, and wait for the next announce.
+            </Text>
+          ) : (
+            tags.map((tag) => (
+              <View key={tag} style={styles.tagRow}>
+                <View style={styles.flex}>
+                  <Text style={styles.tag}>tag {tag.slice(0, 8)}…</Text>
+                  <Text style={ui.faint}>Rotating address · name not broadcast</Text>
+                </View>
+                <ActionButton
+                  label={sending === tag ? 'Sending…' : 'Say hello'}
+                  compact
+                  onPress={() => void sayHello(tag)}
+                  disabled={sending !== null}
+                />
+              </View>
+            ))
+          )}
+        </Card>
+
+        <SectionLabel>Manual link</SectionLabel>
+        <Card>
+          <View style={styles.row}>
+            <TextInput
+              style={styles.input}
+              placeholder="192.168.43.22"
+              placeholderTextColor={colors.faint}
+              value={manualIp}
+              onChangeText={setManualIp}
+              autoCapitalize="none"
+              keyboardType="numbers-and-punctuation"
+            />
+            <ActionButton label="Link" compact onPress={() => void connectManual()} />
+          </View>
+          <Text style={ui.faint}>Fallback when the access point blocks subnet scanning.</Text>
+        </Card>
+
+        <Pressable onPress={() => router.push('/network')} style={styles.linkOut}>
+          <Text style={styles.linkOutText}>Open the full network view →</Text>
         </Pressable>
-        <Text style={styles.title}>Nearby mesh</Text>
-      </View>
-
-      <View style={styles.card}>
-        <Text style={styles.cardTitle}>Transports</Text>
-        <Text style={styles.line}>
-          Wi-Fi/LAN: {snap.started ? `running on ${snap.ip ?? 'no network'} :${snap.port}` : 'stopped'} —{' '}
-          {snap.lanPeers} direct link(s)
-        </Text>
-        <Text style={styles.line}>Bluetooth LE: {bleLabel[snap.ble] ?? snap.ble}</Text>
-        <Text style={styles.hint}>
-          Both phones must be on the same Wi-Fi, or one can share a hotspot. Messages
-          hop through other Chimera devices (TTL relay) until they reach the target.
-        </Text>
-      </View>
-
-      <View style={styles.rowBtns}>
-        <Pressable style={styles.actionBtn} onPress={() => void scan()} disabled={scanning}>
-          <Text style={styles.actionText}>{scanning ? 'Scanning…' : 'Scan local network'}</Text>
-        </Pressable>
-        <Pressable
-          style={styles.actionBtn}
-          onPress={() => {
-            void mesh.sendHello();
-            Alert.alert('Beacon sent', 'Your discovery beacon was broadcast to all links.');
-          }}
-        >
-          <Text style={styles.actionText}>Re-announce</Text>
-        </Pressable>
-      </View>
-
-      <View style={styles.card}>
-        <Text style={styles.cardTitle}>Manual link</Text>
-        <View style={styles.manualRow}>
-          <TextInput
-            style={styles.input}
-            placeholder="e.g. 192.168.43.22"
-            placeholderTextColor="#666"
-            value={manualIp}
-            onChangeText={setManualIp}
-            autoCapitalize="none"
-            keyboardType="numbers-and-punctuation"
-          />
-          <Pressable style={styles.linkBtn} onPress={() => void connectManual()}>
-            <Text style={styles.actionText}>Link</Text>
-          </Pressable>
-        </View>
-      </View>
-
-      <Text style={styles.sectionTitle}>Discovered people</Text>
-      <ScrollView contentContainerStyle={styles.peersWrap}>
-        {peers.length === 0 && <Text style={styles.hint}>No peers discovered yet.</Text>}
-        {peers.map((p) => (
-          <Pressable key={p.pk} style={styles.peerRow} onPress={() => router.push(`/chat/${p.pk}`)}>
-            <View style={styles.avatar}>
-              <Text style={styles.avatarText}>{(p.name || '?').slice(0, 1).toUpperCase()}</Text>
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.peerName}>{p.name}</Text>
-              <Text style={styles.peerSub}>
-                {p.pk.slice(0, 12)}… · last seen {new Date(p.lastSeen).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-              </Text>
-            </View>
-          </Pressable>
-        ))}
       </ScrollView>
-    </View>
+    </Screen>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#101012', paddingTop: 56 },
-  header: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 14, paddingBottom: 12 },
-  backBtn: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center' },
-  backText: { color: '#0a84ff', fontSize: 30, marginTop: -4 },
-  title: { color: '#fff', fontSize: 22, fontWeight: '800' },
-  card: {
-    backgroundColor: '#18181b',
-    borderRadius: 14,
-    padding: 14,
-    marginHorizontal: 14,
-    marginBottom: 12,
-    gap: 6,
+  content: { paddingBottom: space.xxl },
+  flex: { flex: 1 },
+  row: { flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: space.xs },
+  statusRow: { flexDirection: 'row', alignItems: 'center', gap: space.md, justifyContent: 'space-between' },
+  cardTitle: { ...type.heading, color: colors.softWhite, fontSize: 15 },
+  honestCard: { backgroundColor: colors.raised },
+  tagRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.sm,
+    paddingVertical: space.sm,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.line,
   },
-  cardTitle: { color: '#fff', fontWeight: '700', fontSize: 15 },
-  line: { color: '#c7c7cc', fontSize: 13 },
-  hint: { color: '#6b6b70', fontSize: 12, lineHeight: 17 },
-  rowBtns: { flexDirection: 'row', gap: 10, paddingHorizontal: 14, marginBottom: 12 },
-  actionBtn: { flex: 1, backgroundColor: '#0a84ff', borderRadius: 10, paddingVertical: 12, alignItems: 'center' },
-  actionText: { color: '#fff', fontWeight: '600', fontSize: 14 },
-  manualRow: { flexDirection: 'row', gap: 8 },
+  tag: { color: colors.softWhite, fontFamily: 'monospace', fontSize: 13 },
   input: {
     flex: 1,
-    backgroundColor: '#101012',
-    borderRadius: 10,
-    color: '#fff',
-    paddingHorizontal: 12,
+    backgroundColor: colors.jetBlack,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.line,
+    color: colors.softWhite,
+    paddingHorizontal: space.md,
+    paddingVertical: 11,
     fontSize: 14,
   },
-  linkBtn: { backgroundColor: '#1c1c1e', borderRadius: 10, paddingHorizontal: 18, justifyContent: 'center' },
-  sectionTitle: { color: '#8e8e93', fontSize: 12, paddingHorizontal: 18, marginBottom: 6, textTransform: 'uppercase' },
-  peersWrap: { paddingHorizontal: 14, paddingBottom: 30 },
-  peerRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 8 },
-  avatar: { width: 44, height: 44, borderRadius: 22, backgroundColor: '#0a84ff', alignItems: 'center', justifyContent: 'center' },
-  avatarText: { color: '#fff', fontSize: 18, fontWeight: '700' },
-  peerName: { color: '#fff', fontSize: 15, fontWeight: '600' },
-  peerSub: { color: '#6b6b70', fontSize: 11 },
+  linkOut: { paddingHorizontal: space.xl, paddingTop: space.md },
+  linkOutText: { color: colors.flame, fontWeight: '700', fontSize: 13 },
 });

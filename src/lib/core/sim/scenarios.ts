@@ -25,21 +25,25 @@ export interface ScenarioDef {
 
 /** Walking-speed mobile crowd at mean degree ~5. */
 function density(nodeCount: number): ScenarioDef {
+  // The two biggest crowds run shorter (sim cost grows super-linearly with
+  // node count because spray replication saturates the mesh); documented
+  // durations are per-scenario and reported in METRICS.
+  const heavy = nodeCount >= 100;
   const area = sideForDegree(nodeCount, 30, 5);
   return {
     name: `density-${nodeCount}`,
-    description: `${nodeCount} nodes walking at 1.4 m/s in a ${area}x${area} m area, radio range 30 m, 20 stranger messages over 10 min.`,
+    description: `${nodeCount} nodes walking at 1.4 m/s in a ${area}x${area} m area, radio range 30 m, ${heavy ? 10 : 20} stranger messages over ${heavy ? 5 : 10} min.`,
     build: () => ({
       name: `density-${nodeCount}`,
       seed: 42,
       nodeCount,
       areaM: area,
       radioRangeM: 30,
-      durationSec: 600,
+      durationSec: heavy ? 300 : 600,
       speedMps: 1.4,
-      gossipEverySec: 5,
+      gossipEverySec: heavy ? 10 : 5,
       tickEverySec: 15,
-      messageCount: 20,
+      messageCount: heavy ? 10 : 20,
       firstSendSec: 30,
       sendSpacingSec: 20,
       relayEnabled: true,
